@@ -1,19 +1,21 @@
-{-# LANGUAGE CPP, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE CPP                        #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 -- | Tests for the 'Data.HashSet' module.  We test functions by
--- comparing them to a simpler model, a list.
+-- comparing them to @Set@ from @containers@.
 
-module Main (main) where
+module Properties.HashSet (tests) where
+
+import Data.Hashable         (Hashable (hashWithSalt))
+import Data.Ord              (comparing)
+import Test.QuickCheck       (Arbitrary, Property, (===), (==>))
+import Test.Tasty            (TestTree, testGroup)
+import Test.Tasty.QuickCheck (testProperty)
 
 import qualified Data.Foldable as Foldable
-import Data.Hashable (Hashable(hashWithSalt))
-import qualified Data.List as L
-import qualified Data.HashSet as S
-import qualified Data.Set as Set
-import Data.Ord (comparing)
-import Test.QuickCheck (Arbitrary, Property, (==>), (===))
-import Test.Framework (Test, defaultMain, testGroup)
-import Test.Framework.Providers.QuickCheck2 (testProperty)
+import qualified Data.HashSet  as S
+import qualified Data.List     as List
+import qualified Data.Set      as Set
 
 -- Key type that generates more hash collisions.
 newtype Key = K { unK :: Int }
@@ -77,28 +79,28 @@ pReadShow :: [Key] -> Bool
 pReadShow xs = Set.fromList xs == read (show (Set.fromList xs))
 
 pFoldable :: [Int] -> Bool
-pFoldable = (L.sort . Foldable.foldr (:) []) `eq`
-            (L.sort . Foldable.foldr (:) [])
+pFoldable = (List.sort . Foldable.foldr (:) []) `eq`
+            (List.sort . Foldable.foldr (:) [])
 
 pPermutationEq :: [Key] -> [Int] -> Bool
 pPermutationEq xs is = S.fromList xs == S.fromList ys
   where
     ys = shuffle is xs
-    shuffle idxs = L.map snd
-                 . L.sortBy (comparing fst)
-                 . L.zip (idxs ++ [L.maximum (0:is) + 1 ..])
+    shuffle idxs = List.map snd
+                 . List.sortBy (comparing fst)
+                 . List.zip (idxs ++ [List.maximum (0:is) + 1 ..])
 
 pHashable :: [Key] -> [Int] -> Int -> Property
 pHashable xs is salt =
     x == y ==> hashWithSalt salt x === hashWithSalt salt y
   where
-    xs' = L.nub xs
+    xs' = List.nub xs
     ys = shuffle is xs'
     x = S.fromList xs'
     y = S.fromList ys
-    shuffle idxs = L.map snd
-                 . L.sortBy (comparing fst)
-                 . L.zip (idxs ++ [L.maximum (0:is) + 1 ..])
+    shuffle idxs = List.map snd
+                 . List.sortBy (comparing fst)
+                 . List.zip (idxs ++ [List.maximum (0:is) + 1 ..])
 
 ------------------------------------------------------------------------
 -- ** Basic interface
@@ -132,25 +134,17 @@ pMap = Set.map (+ 1) `eq_` S.map (+ 1)
 -- ** Folds
 
 pFoldr :: [Int] -> Bool
-pFoldr = (L.sort . foldrSet (:) []) `eq`
-         (L.sort . S.foldr (:) [])
+pFoldr = (List.sort . foldrSet (:) []) `eq`
+         (List.sort . S.foldr (:) [])
 
 foldrSet :: (a -> b -> b) -> b -> Set.Set a -> b
-#if MIN_VERSION_containers(0,4,2)
 foldrSet = Set.foldr
-#else
-foldrSet = Foldable.foldr
-#endif
 
 pFoldl' :: Int -> [Int] -> Bool
 pFoldl' z0 = foldl'Set (+) z0 `eq` S.foldl' (+) z0
 
 foldl'Set :: (a -> b -> a) -> a -> Set.Set b -> a
-#if MIN_VERSION_containers(0,4,2)
 foldl'Set = Set.foldl'
-#else
-foldl'Set = Foldable.foldl'
-#endif
 
 ------------------------------------------------------------------------
 -- ** Filter
@@ -167,8 +161,8 @@ pToList = Set.toAscList `eq` toAscList
 ------------------------------------------------------------------------
 -- * Test list
 
-tests :: [Test]
-tests =
+tests :: TestTree
+tests = testGroup "Data.HashSet"
     [
     -- Instances
       testGroup "instances"
@@ -236,13 +230,7 @@ eq_ :: (Eq a, Hashable a, Ord a)
 eq_ f g = (Set.toAscList . f) `eq` (toAscList . g)
 
 ------------------------------------------------------------------------
--- * Test harness
-
-main :: IO ()
-main = defaultMain tests
-
-------------------------------------------------------------------------
 -- * Helpers
 
 toAscList :: Ord a => S.HashSet a -> [a]
-toAscList = L.sort . S.toList
+toAscList = List.sort . S.toList

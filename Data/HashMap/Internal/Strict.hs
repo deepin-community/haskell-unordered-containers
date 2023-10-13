@@ -1,6 +1,10 @@
-{-# LANGUAGE BangPatterns, CPP, PatternGuards, MagicHash, UnboxedTuples #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE BangPatterns  #-}
+{-# LANGUAGE CPP           #-}
+{-# LANGUAGE MagicHash     #-}
+{-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE Trustworthy   #-}
+{-# LANGUAGE UnboxedTuples #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
 ------------------------------------------------------------------------
 -- |
@@ -8,8 +12,21 @@
 -- Copyright   :  2010-2012 Johan Tibell
 -- License     :  BSD-style
 -- Maintainer  :  johan.tibell@gmail.com
--- Stability   :  provisional
 -- Portability :  portable
+--
+-- = WARNING
+--
+-- This module is considered __internal__.
+--
+-- The Package Versioning Policy __does not apply__.
+--
+-- The contents of this module may change __in any way whatsoever__
+-- and __without any warning__ between minor versions of this package.
+--
+-- Authors importing this module are expected to track development
+-- closely.
+--
+-- = Description
 --
 -- A map from /hashable/ keys to values.  A map cannot contain
 -- duplicate keys; each key can map to at most one value.  A 'HashMap'
@@ -21,9 +38,9 @@
 -- strings.
 --
 -- Many operations have a average-case complexity of /O(log n)/.  The
--- implementation uses a large base (i.e. 16) so in practice these
+-- implementation uses a large base (i.e. 32) so in practice these
 -- operations are constant time.
-module Data.HashMap.Strict.Base
+module Data.HashMap.Internal.Strict
     (
       -- * Strictness properties
       -- $strictness
@@ -39,6 +56,8 @@ module Data.HashMap.Strict.Base
     , size
     , HM.member
     , HM.lookup
+    , (HM.!?)
+    , HM.findWithDefault
     , lookupDefault
     , (!)
     , insert
@@ -48,6 +67,8 @@ module Data.HashMap.Strict.Base
     , update
     , alter
     , alterF
+    , isSubmapOf
+    , isSubmapOfBy
 
       -- * Combine
       -- ** Union
@@ -56,10 +77,14 @@ module Data.HashMap.Strict.Base
     , unionWithKey
     , unions
 
+    -- ** Compose
+    , compose
+
       -- * Transformations
     , map
     , mapWithKey
     , traverseWithKey
+    , mapKeys
 
       -- * Difference and intersection
     , difference
@@ -69,10 +94,15 @@ module Data.HashMap.Strict.Base
     , intersectionWithKey
 
       -- * Folds
+    , foldMapWithKey
+    , foldr'
     , foldl'
+    , foldrWithKey'
     , foldlWithKey'
     , HM.foldr
+    , HM.foldl
     , foldrWithKey
+    , foldlWithKey
 
       -- * Filter
     , HM.filter
@@ -88,30 +118,26 @@ module Data.HashMap.Strict.Base
     , toList
     , fromList
     , fromListWith
+    , fromListWithKey
     ) where
 
-import Data.Bits ((.&.), (.|.))
+import Control.Applicative   (Const (..))
+import Control.Monad.ST      (runST)
+import Data.Bits             ((.&.), (.|.))
+import Data.Coerce           (coerce)
+import Data.Functor.Identity (Identity (..))
+import Data.HashMap.Internal hiding (adjust, alter, alterF, differenceWith,
+                              fromList, fromListWith, fromListWithKey, insert,
+                              insertWith, intersectionWith, intersectionWithKey,
+                              map, mapMaybe, mapMaybeWithKey, mapWithKey,
+                              singleton, traverseWithKey, unionWith,
+                              unionWithKey, update)
+import Data.Hashable         (Hashable)
+import Prelude               hiding (lookup, map)
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative (Applicative (..), (<$>))
-#endif
-import qualified Data.List as L
-import Data.Hashable (Hashable)
-import Prelude hiding (map, lookup)
-
-import qualified Data.HashMap.Array as A
-import qualified Data.HashMap.Base as HM
-import Data.HashMap.Base hiding (
-    alter, alterF, adjust, fromList, fromListWith, insert, insertWith,
-    differenceWith, intersectionWith, intersectionWithKey, map, mapWithKey,
-    mapMaybe, mapMaybeWithKey, singleton, update, unionWith, unionWithKey,
-    traverseWithKey)
-import Data.HashMap.Unsafe (runST)
-#if MIN_VERSION_base(4,8,0)
-import Data.Functor.Identity
-#endif
-import Control.Applicative (Const (..))
-import Data.Coerce
+import qualified Data.HashMap.Internal       as HM
+import qualified Data.HashMap.Internal.Array as A
+import qualified Data.List                   as List
 
 -- $strictness
 --
@@ -152,11 +178,11 @@ insertWith f k0 v0 m0 = go h0 k0 v0 0 m0
   where
     h0 = hash k0
     go !h !k x !_ Empty = leaf h k x
-    go h k x s (Leaf hy l@(L ky y))
+    go h k x s t@(Leaf hy l@(L ky y))
         | hy == h = if ky == k
                     then leaf h k (f x y)
                     else x `seq` (collision h l (L k x))
-        | otherwise = x `seq` runST (two s h k x hy ky y)
+        | otherwise = x `seq` runST (two s h k x hy t)
     go h k x s (BitmapIndexed b ary)
         | b .&. m == 0 =
             let ary' = A.insert ary i $! leaf h k x
@@ -171,7 +197,7 @@ insertWith f k0 v0 m0 = go h0 k0 v0 0 m0
     go h k x s (Full ary) =
         let st   = A.index ary i
             st'  = go h k x (s+bitsPerSubkey) st
-            ary' = update16 ary i $! st'
+            ary' = update32 ary i $! st'
         in Full ary'
       where i = index h s
     go h k x s t@(Collision hy v)
@@ -182,17 +208,22 @@ insertWith f k0 v0 m0 = go h0 k0 v0 0 m0
 -- | In-place update version of insertWith
 unsafeInsertWith :: (Eq k, Hashable k) => (v -> v -> v) -> k -> v -> HashMap k v
                  -> HashMap k v
-unsafeInsertWith f k0 v0 m0 = runST (go h0 k0 v0 0 m0)
+unsafeInsertWith f k0 v0 m0 = unsafeInsertWithKey (const f) k0 v0 m0
+{-# INLINABLE unsafeInsertWith #-}
+
+unsafeInsertWithKey :: (Eq k, Hashable k) => (k -> v -> v -> v) -> k -> v -> HashMap k v
+                    -> HashMap k v
+unsafeInsertWithKey f k0 v0 m0 = runST (go h0 k0 v0 0 m0)
   where
     h0 = hash k0
     go !h !k x !_ Empty = return $! leaf h k x
-    go h k x s (Leaf hy l@(L ky y))
+    go h k x s t@(Leaf hy l@(L ky y))
         | hy == h = if ky == k
-                    then return $! leaf h k (f x y)
+                    then return $! leaf h k (f k x y)
                     else do
                         let l' = x `seq` (L k x)
                         return $! collision h l l'
-        | otherwise = x `seq` two s h k x hy ky y
+        | otherwise = x `seq` two s h k x hy t
     go h k x s t@(BitmapIndexed b ary)
         | b .&. m == 0 = do
             ary' <- A.insertM ary i $! leaf h k x
@@ -211,9 +242,9 @@ unsafeInsertWith f k0 v0 m0 = runST (go h0 k0 v0 0 m0)
         return t
       where i = index h s
     go h k x s t@(Collision hy v)
-        | h == hy   = return $! Collision h (updateOrSnocWith f k x v)
+        | h == hy   = return $! Collision h (updateOrSnocWithKey f k x v)
         | otherwise = go h k x s $ BitmapIndexed (mask hy s) (A.singleton t)
-{-# INLINABLE unsafeInsertWith #-}
+{-# INLINABLE unsafeInsertWithKey #-}
 
 -- | /O(log n)/ Adjust the value tied to a given key in this map only
 -- if it is present. Otherwise, leave the map alone.
@@ -237,23 +268,28 @@ adjust f k0 m0 = go h0 k0 0 m0
         let i    = index h s
             st   = A.index ary i
             st'  = go h k (s+bitsPerSubkey) st
-            ary' = update16 ary i $! st'
+            ary' = update32 ary i $! st'
         in Full ary'
     go h k _ t@(Collision hy v)
         | h == hy   = Collision h (updateWith f k v)
         | otherwise = t
 {-# INLINABLE adjust #-}
 
--- | /O(log n)/  The expression (@'update' f k map@) updates the value @x@ at @k@,
--- (if it is in the map). If (f k x) is @'Nothing', the element is deleted.
--- If it is (@'Just' y), the key k is bound to the new value y.
+-- | /O(log n)/  The expression @('update' f k map)@ updates the value @x@ at @k@
+-- (if it is in the map). If @(f x)@ is 'Nothing', the element is deleted.
+-- If it is @('Just' y)@, the key @k@ is bound to the new value @y@.
 update :: (Eq k, Hashable k) => (a -> Maybe a) -> k -> HashMap k a -> HashMap k a
 update f = alter (>>= f)
 {-# INLINABLE update #-}
 
--- | /O(log n)/  The expression (@'alter' f k map@) alters the value @x@ at @k@, or
--- absence thereof. @alter@ can be used to insert, delete, or update a value in a
--- map. In short : @'lookup' k ('alter' f k m) = f ('lookup' k m)@.
+-- | /O(log n)/  The expression @('alter' f k map)@ alters the value @x@ at @k@, or
+-- absence thereof.
+--
+-- 'alter' can be used to insert, delete, or update a value in a map. In short:
+--
+-- @
+-- 'lookup' k ('alter' f k m) = f ('lookup' k m)
+-- @
 alter :: (Eq k, Hashable k) => (Maybe v -> Maybe v) -> k -> HashMap k v -> HashMap k v
 alter f k m =
   case f (HM.lookup k m) of
@@ -262,13 +298,14 @@ alter f k m =
 {-# INLINABLE alter #-}
 
 -- | /O(log n)/  The expression (@'alterF' f k map@) alters the value @x@ at
--- @k@, or absence thereof. @alterF@ can be used to insert, delete, or update
--- a value in a map.
+-- @k@, or absence thereof.
+--
+-- 'alterF' can be used to insert, delete, or update a value in a map.
 --
 -- Note: 'alterF' is a flipped version of the 'at' combinator from
--- <https://hackage.haskell.org/package/lens-4.15.4/docs/Control-Lens-At.html#v:at Control.Lens.At>.
+-- <https://hackage.haskell.org/package/lens/docs/Control-Lens-At.html#v:at Control.Lens.At>.
 --
--- @since 0.2.9
+-- @since 0.2.10
 alterF :: (Functor f, Eq k, Hashable k)
        => (Maybe v -> f (Maybe v)) -> k -> HashMap k v -> f (HashMap k v)
 -- Special care is taken to only calculate the hash once. When we rewrite
@@ -281,7 +318,7 @@ alterF f = \ !k !m ->
       mv = lookup' h k m
   in (<$> f mv) $ \fres ->
     case fres of
-      Nothing -> delete' h k m
+      Nothing -> maybe m (const (delete' h k m)) mv
       Just !v' -> insert' h k v' m
 
 -- We rewrite this function unconditionally in RULES, but we expose
@@ -289,8 +326,7 @@ alterF f = \ !k !m ->
 -- don't fire.
 {-# INLINABLE [0] alterF #-}
 
-#if MIN_VERSION_base(4,8,0)
--- See notes in Data.HashMap.Base
+-- See notes in Data.HashMap.Internal
 test_bottom :: a
 test_bottom = error "Data.HashMap.alterF internal error: hit test_bottom"
 
@@ -302,7 +338,7 @@ impossibleAdjust = error "Data.HashMap.alterF internal error: impossible adjust"
 
 {-# RULES
 
--- See detailed notes on alterF rules in Data.HashMap.Base.
+-- See detailed notes on alterF rules in Data.HashMap.Internal.
 
 "alterFWeird" forall f. alterF f =
     alterFWeird (f Nothing) (f (Just test_bottom)) f
@@ -384,7 +420,6 @@ alterFEager f !k !m = (<$> f mv) $ \fres ->
           Absent -> Nothing
           Present v _ -> Just v
 {-# INLINABLE alterFEager #-}
-#endif
 
 ------------------------------------------------------------------------
 -- * Combine
@@ -461,12 +496,12 @@ unionWithKey f = go 0
     go s (Full ary1) t2 =
         let h2   = leafHashCode t2
             i    = index h2 s
-            ary' = update16With' ary1 i $ \st1 -> go (s+bitsPerSubkey) st1 t2
+            ary' = update32With' ary1 i $ \st1 -> go (s+bitsPerSubkey) st1 t2
         in Full ary'
     go s t1 (Full ary2) =
         let h1   = leafHashCode t1
             i    = index h1 s
-            ary' = update16With' ary2 i $ \st2 -> go (s+bitsPerSubkey) t1 st2
+            ary' = update32With' ary2 i $ \st2 -> go (s+bitsPerSubkey) t1 st2
         in Full ary'
 
     leafHashCode (Leaf h _) = h
@@ -474,7 +509,7 @@ unionWithKey f = go 0
     leafHashCode _ = error "leafHashCode"
 
     goDifferentHash s h1 h2 t1 t2
-        | m1 == m2  = BitmapIndexed m1 (A.singleton $! go (s+bitsPerSubkey) t1 t2)
+        | m1 == m2  = BitmapIndexed m1 (A.singleton $! goDifferentHash (s+bitsPerSubkey) h1 h2 t1 t2)
         | m1 <  m2  = BitmapIndexed (m1 .|. m2) (A.pair t1 t2)
         | otherwise = BitmapIndexed (m1 .|. m2) (A.pair t2 t1)
       where
@@ -595,25 +630,72 @@ intersectionWithKey f a b = foldlWithKey' go empty a
 -- list contains duplicate mappings, the later mappings take
 -- precedence.
 fromList :: (Eq k, Hashable k) => [(k, v)] -> HashMap k v
-fromList = L.foldl' (\ m (k, !v) -> HM.unsafeInsert k v m) empty
+fromList = List.foldl' (\ m (k, !v) -> HM.unsafeInsert k v m) empty
 {-# INLINABLE fromList #-}
 
 -- | /O(n*log n)/ Construct a map from a list of elements.  Uses
--- the provided function f to merge duplicate entries (f newVal oldVal).
+-- the provided function @f@ to merge duplicate entries with
+-- @(f newVal oldVal)@.
 --
--- For example:
+-- === Examples
 --
--- > fromListWith (+) [ (x, 1) | x <- xs ]
+-- Given a list @xs@, create a map with the number of occurrences of each
+-- element in @xs@:
 --
--- will create a map with number of occurrences of each element in xs.
+-- > let xs = ['a', 'b', 'a']
+-- > in fromListWith (+) [ (x, 1) | x <- xs ]
+-- >
+-- > = fromList [('a', 2), ('b', 1)]
 --
--- > fromListWith (++) [ (k, [v]) | (k, v) <- xs ]
+-- Given a list of key-value pairs @xs :: [(k, v)]@, group all values by their
+-- keys and return a @HashMap k [v]@.
 --
--- will group all values by their keys in a list 'xs :: [(k, v)]' and
--- return a 'HashMap k [v]'.
+-- > let xs = ('a', 1), ('b', 2), ('a', 3)]
+-- > in fromListWith (++) [ (k, [v]) | (k, v) <- xs ]
+-- >
+-- > = fromList [('a', [3, 1]), ('b', [2])]
+--
+-- Note that the lists in the resulting map contain elements in reverse order
+-- from their occurences in the original list.
+--
+-- More generally, duplicate entries are accumulated as follows;
+-- this matters when @f@ is not commutative or not associative.
+--
+-- > fromListWith f [(k, a), (k, b), (k, c), (k, d)]
+-- > = fromList [(k, f d (f c (f b a)))]
 fromListWith :: (Eq k, Hashable k) => (v -> v -> v) -> [(k, v)] -> HashMap k v
-fromListWith f = L.foldl' (\ m (k, v) -> unsafeInsertWith f k v m) empty
+fromListWith f = List.foldl' (\ m (k, v) -> unsafeInsertWith f k v m) empty
 {-# INLINE fromListWith #-}
+
+-- | /O(n*log n)/ Construct a map from a list of elements.  Uses
+-- the provided function to merge duplicate entries.
+--
+-- === Examples
+--
+-- Given a list of key-value pairs where the keys are of different flavours, e.g:
+--
+-- > data Key = Div | Sub
+--
+-- and the values need to be combined differently when there are duplicates,
+-- depending on the key:
+--
+-- > combine Div = div
+-- > combine Sub = (-)
+--
+-- then @fromListWithKey@ can be used as follows:
+--
+-- > fromListWithKey combine [(Div, 2), (Div, 6), (Sub, 2), (Sub, 3)]
+-- > = fromList [(Div, 3), (Sub, 1)]
+--
+-- More generally, duplicate entries are accumulated as follows;
+--
+-- > fromListWith f [(k, a), (k, b), (k, c), (k, d)]
+-- > = fromList [(k, f k d (f k c (f k b a)))]
+--
+-- @since 0.2.11
+fromListWithKey :: (Eq k, Hashable k) => (k -> v -> v -> v) -> [(k, v)] -> HashMap k v
+fromListWithKey f = List.foldl' (\ m (k, v) -> unsafeInsertWithKey f k v m) empty
+{-# INLINE fromListWithKey #-}
 
 ------------------------------------------------------------------------
 -- Array operations
