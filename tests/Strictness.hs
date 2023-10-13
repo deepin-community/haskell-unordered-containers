@@ -1,26 +1,24 @@
-{-# LANGUAGE CPP, FlexibleInstances, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE CPP                        #-}
+{-# LANGUAGE FlexibleInstances          #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
-module Main (main) where
+module Strictness (tests) where
 
-import Data.Hashable (Hashable(hashWithSalt))
+import Control.Arrow                (second)
+import Control.Monad                (guard)
+import Data.Foldable                (foldl')
+import Data.HashMap.Strict          (HashMap)
+import Data.Hashable                (Hashable (hashWithSalt))
+import Data.Maybe                   (fromMaybe, isJust)
 import Test.ChasingBottoms.IsBottom
-import Test.Framework (Test, defaultMain, testGroup)
-import Test.Framework.Providers.QuickCheck2 (testProperty)
-import Test.QuickCheck (Arbitrary(arbitrary), Property, (===), (.&&.))
+import Test.QuickCheck              (Arbitrary (arbitrary), Property, (.&&.),
+                                     (===))
 import Test.QuickCheck.Function
-import Test.QuickCheck.Poly (A)
-import Data.Maybe (fromMaybe, isJust)
-import Control.Arrow (second)
-import Control.Monad (guard)
-import Data.Foldable (foldl')
-#if !MIN_VERSION_base(4,8,0)
-import Data.Functor ((<$))
-import Data.Foldable (all)
-import Prelude hiding (all)
-#endif
+import Test.QuickCheck.Poly         (A)
+import Test.Tasty                   (TestTree, testGroup)
+import Test.Tasty.QuickCheck        (testProperty)
 
-import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
 
 -- Key type that generates more hash collisions.
@@ -54,6 +52,9 @@ pSingletonValueStrict k = isBottom $ (HM.singleton k (bottom :: Int))
 
 pLookupDefaultKeyStrict :: Int -> HashMap Key Int -> Bool
 pLookupDefaultKeyStrict def m = isBottom $ HM.lookupDefault def bottom m
+
+pFindWithDefaultKeyStrict :: Int -> HashMap Key Int -> Bool
+pFindWithDefaultKeyStrict def m = isBottom $ HM.findWithDefault def bottom m
 
 pAdjustKeyStrict :: (Int -> Int) -> HashMap Key Int -> Bool
 pAdjustKeyStrict f m = isBottom $ HM.adjust f bottom m
@@ -151,8 +152,8 @@ pFromListWithValueResultStrict lst comb_lazy calc_good_raw
 ------------------------------------------------------------------------
 -- * Test list
 
-tests :: [Test]
-tests =
+tests :: TestTree
+tests = testGroup "Strictness"
     [
     -- Basic interface
       testGroup "HashMap.Strict"
@@ -161,6 +162,7 @@ tests =
       , testProperty "member is key-strict" $ keyStrict HM.member
       , testProperty "lookup is key-strict" $ keyStrict HM.lookup
       , testProperty "lookupDefault is key-strict" pLookupDefaultKeyStrict
+      , testProperty "findWithDefault is key-strict" pFindWithDefaultKeyStrict
       , testProperty "! is key-strict" $ keyStrict (flip (HM.!))
       , testProperty "delete is key-strict" $ keyStrict HM.delete
       , testProperty "adjust is key-strict" pAdjustKeyStrict
@@ -175,12 +177,6 @@ tests =
       , testProperty "fromListWith is value-strict" pFromListWithValueResultStrict
       ]
     ]
-
-------------------------------------------------------------------------
--- * Test harness
-
-main :: IO ()
-main = defaultMain tests
 
 ------------------------------------------------------------------------
 -- * Utilities

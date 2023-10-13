@@ -1,30 +1,30 @@
-{-# LANGUAGE CPP, DeriveGeneric, GADTs, PackageImports, RecordWildCards #-}
+{-# LANGUAGE CPP             #-}
+{-# LANGUAGE DeriveAnyClass  #-}
+{-# LANGUAGE DeriveGeneric   #-}
+{-# LANGUAGE GADTs           #-}
+{-# LANGUAGE PackageImports  #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Main where
 
-import Control.DeepSeq
-import Control.DeepSeq.Generics (genericRnf)
-import Criterion.Main (bench, bgroup, defaultMain, env, nf, whnf)
-import Data.Bits ((.&.))
-import Data.Functor.Identity
-import Data.Hashable (Hashable)
-import qualified Data.ByteString as BS
+import Control.DeepSeq       (NFData (..))
+import Data.Bits             ((.&.))
+import Data.Functor.Identity (Identity (..))
+import Data.Hashable         (Hashable, hash)
+import Data.List             (foldl')
+import Data.Maybe            (fromMaybe)
+import GHC.Generics          (Generic)
+import Prelude               hiding (lookup)
+import Test.Tasty.Bench      (bench, bgroup, defaultMain, env, nf, whnf)
+
+import qualified Data.ByteString        as BS
 import qualified "hashmap" Data.HashMap as IHM
-import qualified Data.HashMap.Strict as HM
-import qualified Data.IntMap as IM
-import qualified Data.Map as M
-import Data.List (foldl')
-import Data.Maybe (fromMaybe)
-import GHC.Generics (Generic)
-import Prelude hiding (lookup)
-
-import qualified Util.ByteString as UBS
-import qualified Util.Int as UI
-import qualified Util.String as US
-
-#if !MIN_VERSION_bytestring(0,10,0)
-instance NFData BS.ByteString
-#endif
+import qualified Data.HashMap.Strict    as HM
+import qualified Data.IntMap            as IM
+import qualified Data.Map               as M
+import qualified Util.ByteString        as UBS
+import qualified Util.Int               as UI
+import qualified Util.String            as US
 
 data B where
     B :: NFData a => a -> B
@@ -56,18 +56,24 @@ data Env = Env {
     elemsDupBS :: ![(BS.ByteString, Int)],
     elemsDupI  :: ![(Int, Int)],
 
-    hm    :: !(HM.HashMap String Int),
-    hmbs  :: !(HM.HashMap BS.ByteString Int),
-    hmi   :: !(HM.HashMap Int Int),
-    hmi2  :: !(HM.HashMap Int Int),
-    m     :: !(M.Map String Int),
-    mbs   :: !(M.Map BS.ByteString Int),
-    im    :: !(IM.IntMap Int),
-    ihm   :: !(IHM.Map String Int),
-    ihmbs :: !(IHM.Map BS.ByteString Int)
-    } deriving Generic
-
-instance NFData Env where rnf = genericRnf
+    hm          :: !(HM.HashMap String Int),
+    hmSubset    :: !(HM.HashMap String Int),
+    hmbs        :: !(HM.HashMap BS.ByteString Int),
+    hmbsSubset  :: !(HM.HashMap BS.ByteString Int),
+    hmi         :: !(HM.HashMap Int Int),
+    hmiSubset   :: !(HM.HashMap Int Int),
+    hmi2        :: !(HM.HashMap Int Int),
+    m           :: !(M.Map String Int),
+    mSubset     :: !(M.Map String Int),
+    mbs         :: !(M.Map BS.ByteString Int),
+    mbsSubset   :: !(M.Map BS.ByteString Int),
+    im          :: !(IM.IntMap Int),
+    imSubset    :: !(IM.IntMap Int),
+    ihm         :: !(IHM.Map String Int),
+    ihmSubset   :: !(IHM.Map String Int),
+    ihmbs       :: !(IHM.Map BS.ByteString Int),
+    ihmbsSubset :: !(IHM.Map BS.ByteString Int)
+    } deriving (Generic, NFData)
 
 setupEnv :: IO Env
 setupEnv = do
@@ -92,21 +98,35 @@ setupEnv = do
         elemsDupBS = zip keysDupBS [1..n]
         elemsDupI  = zip keysDupI [1..n]
 
-        hm   = HM.fromList elems
-        hmbs = HM.fromList elemsBS
-        hmi  = HM.fromList elemsI
-        hmi2 = HM.fromList elemsI2
-        m    = M.fromList elems
-        mbs  = M.fromList elemsBS
-        im   = IM.fromList elemsI
-        ihm  = IHM.fromList elems
-        ihmbs = IHM.fromList elemsBS
+        hm          = HM.fromList elems
+        hmSubset    = HM.fromList (takeSubset n elems)
+        hmbs        = HM.fromList elemsBS
+        hmbsSubset  = HM.fromList (takeSubset n elemsBS)
+        hmi         = HM.fromList elemsI
+        hmiSubset   = HM.fromList (takeSubset n elemsI)
+        hmi2        = HM.fromList elemsI2
+        m           = M.fromList elems
+        mSubset     = M.fromList (takeSubset n elems)
+        mbs         = M.fromList elemsBS
+        mbsSubset   = M.fromList (takeSubset n elemsBS)
+        im          = IM.fromList elemsI
+        imSubset    = IM.fromList (takeSubset n elemsI)
+        ihm         = IHM.fromList elems
+        ihmSubset   = IHM.fromList (takeSubset n elems)
+        ihmbs       = IHM.fromList elemsBS
+        ihmbsSubset = IHM.fromList (takeSubset n elemsBS)
     return Env{..}
+  where
+    takeSubset n elements =
+      -- use 50% of the elements for a subset check.
+      let subsetSize = round (fromIntegral n * 0.5 :: Double) :: Int
+      in take subsetSize elements
 
 main :: IO ()
 main = do
     defaultMain
         [
+#ifdef BENCH_containers_Map
           env setupEnv $ \ ~(Env{..}) ->
           -- * Comparison to other data structures
           -- ** Map
@@ -143,10 +163,16 @@ main = do
             [ bench "String" $ whnf M.fromList elems
             , bench "ByteString" $ whnf M.fromList elemsBS
             ]
-          ]
+          , bgroup "isSubmapOf"
+            [ bench "String" $ whnf (M.isSubmapOf mSubset) m
+            , bench "ByteString" $ whnf (M.isSubmapOf mbsSubset) mbs
+            ]
+          ],
+#endif
 
+#ifdef BENCH_hashmap_Map
           -- ** Map from the hashmap package
-        , env setupEnv $ \ ~(Env{..}) ->
+          env setupEnv $ \ ~(Env{..}) ->
           bgroup "hashmap/Map"
           [ bgroup "lookup"
             [ bench "String" $ whnf (lookupIHM keys) ihm
@@ -180,10 +206,16 @@ main = do
             [ bench "String" $ whnf IHM.fromList elems
             , bench "ByteString" $ whnf IHM.fromList elemsBS
             ]
-          ]
+          , bgroup "isSubmapOf"
+            [ bench "String" $ whnf (IHM.isSubmapOf ihmSubset) ihm
+            , bench "ByteString" $ whnf (IHM.isSubmapOf ihmbsSubset) ihmbs
+            ]
+          ],
+#endif
 
+#ifdef BENCH_containers_IntMap
           -- ** IntMap
-        , env setupEnv $ \ ~(Env{..}) ->
+          env setupEnv $ \ ~(Env{..}) ->
           bgroup "IntMap"
           [ bench "lookup" $ whnf (lookupIM keysI) im
           , bench "lookup-miss" $ whnf (lookupIM keysI') im
@@ -193,9 +225,11 @@ main = do
           , bench "delete-miss" $ whnf (deleteIM keysI') im
           , bench "size" $ whnf IM.size im
           , bench "fromList" $ whnf IM.fromList elemsI
-          ]
+          , bench "isSubmapOf" $ whnf (IM.isSubmapOf imSubset) im
+          ],
+#endif
 
-        , env setupEnv $ \ ~(Env{..}) ->
+          env setupEnv $ \ ~(Env{..}) ->
           bgroup "HashMap"
           [ -- * Basic interface
             bgroup "lookup"
@@ -268,6 +302,16 @@ main = do
             , bench "ByteString" $ whnf (alterFDelete keysBS') hmbs
             , bench "Int" $ whnf (alterFDelete keysI') hmi
             ]
+          , bgroup "isSubmapOf"
+            [ bench "String" $ whnf (HM.isSubmapOf hmSubset) hm
+            , bench "ByteString" $ whnf (HM.isSubmapOf hmbsSubset) hmbs
+            , bench "Int" $ whnf (HM.isSubmapOf hmiSubset) hmi
+            ]
+          , bgroup "isSubmapOfNaive"
+            [ bench "String" $ whnf (isSubmapOfNaive hmSubset) hm
+            , bench "ByteString" $ whnf (isSubmapOfNaive hmbsSubset) hmbs
+            , bench "Int" $ whnf (isSubmapOfNaive hmiSubset) hmi
+            ]
 
             -- Combine
           , bench "union" $ whnf (HM.union hmi) hmi2
@@ -319,6 +363,11 @@ main = do
               , bench "ByteString" $ whnf (HM.fromListWith (+)) elemsDupBS
               , bench "Int" $ whnf (HM.fromListWith (+)) elemsDupI
               ]
+            ]
+            -- Hashable instance
+          , bgroup "hash"
+            [ bench "String" $ whnf hash hm
+            , bench "ByteString" $ whnf hash hmbs
             ]
           ]
         ]
@@ -395,6 +444,13 @@ alterFDelete xs m0 =
 {-# SPECIALIZE alterFDelete :: [BS.ByteString] -> HM.HashMap BS.ByteString Int
                             -> HM.HashMap BS.ByteString Int #-}
 
+isSubmapOfNaive :: (Eq k, Hashable k) => HM.HashMap k Int -> HM.HashMap k Int -> Bool
+isSubmapOfNaive m1 m2 = and [ Just v1 == HM.lookup k1 m2 | (k1,v1) <- HM.toList m1 ]
+{-# SPECIALIZE isSubmapOfNaive :: HM.HashMap Int Int -> HM.HashMap Int Int -> Bool #-}
+{-# SPECIALIZE isSubmapOfNaive :: HM.HashMap String Int -> HM.HashMap String Int -> Bool #-}
+{-# SPECIALIZE isSubmapOfNaive :: HM.HashMap BS.ByteString Int -> HM.HashMap BS.ByteString Int -> Bool #-}
+
+#ifdef BENCH_containers_Map
 ------------------------------------------------------------------------
 -- * Map
 
@@ -415,7 +471,9 @@ deleteM xs m0 = foldl' (\m k -> M.delete k m) m0 xs
 {-# SPECIALIZE deleteM :: [String] -> M.Map String Int -> M.Map String Int #-}
 {-# SPECIALIZE deleteM :: [BS.ByteString] -> M.Map BS.ByteString Int
                        -> M.Map BS.ByteString Int #-}
+#endif
 
+#ifdef BENCH_hashmap_Map
 ------------------------------------------------------------------------
 -- * Map from the hashmap package
 
@@ -439,7 +497,9 @@ deleteIHM xs m0 = foldl' (\m k -> IHM.delete k m) m0 xs
                          -> IHM.Map String Int #-}
 {-# SPECIALIZE deleteIHM :: [BS.ByteString] -> IHM.Map BS.ByteString Int
                          -> IHM.Map BS.ByteString Int #-}
+#endif
 
+#ifdef BENCH_containers_IntMap
 ------------------------------------------------------------------------
 -- * IntMap
 
@@ -451,3 +511,4 @@ insertIM xs m0 = foldl' (\m (k, v) -> IM.insert k v m) m0 xs
 
 deleteIM :: [Int] -> IM.IntMap Int -> IM.IntMap Int
 deleteIM xs m0 = foldl' (\m k -> IM.delete k m) m0 xs
+#endif

@@ -1,12 +1,33 @@
-{-# LANGUAGE BangPatterns, CPP, MagicHash, Rank2Types, UnboxedTuples, ScopedTypeVariables #-}
+{-# LANGUAGE BangPatterns          #-}
+{-# LANGUAGE CPP                   #-}
+{-# LANGUAGE MagicHash             #-}
+{-# LANGUAGE Rank2Types            #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE TemplateHaskellQuotes #-}
+{-# LANGUAGE UnboxedTuples         #-}
 {-# OPTIONS_GHC -fno-full-laziness -funbox-strict-fields #-}
+{-# OPTIONS_HADDOCK not-home #-}
 
--- | Zero based arrays.
+-- | = WARNING
+--
+-- This module is considered __internal__.
+--
+-- The Package Versioning Policy __does not apply__.
+--
+-- The contents of this module may change __in any way whatsoever__
+-- and __without any warning__ between minor versions of this package.
+--
+-- Authors importing this module are expected to track development
+-- closely.
+--
+-- = Description
+--
+-- Zero based arrays.
 --
 -- Note that no bounds checking are performed.
-module Data.HashMap.Array
-    ( Array
-    , MArray
+module Data.HashMap.Internal.Array
+    ( Array(..)
+    , MArray(..)
 
       -- * Creation
     , new
@@ -36,13 +57,16 @@ module Data.HashMap.Array
     , unsafeThaw
     , unsafeSameArray
     , run
-    , run2
     , copy
     , copyM
 
       -- * Folds
+    , foldl
     , foldl'
     , foldr
+    , foldr'
+    , foldMap
+    , all
 
     , thaw
     , map
@@ -51,118 +75,39 @@ module Data.HashMap.Array
     , traverse'
     , toList
     , fromList
+    , fromList'
     ) where
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative (Applicative (..), (<$>))
-#endif
 import Control.Applicative (liftA2)
-import Control.DeepSeq
-import GHC.Exts(Int(..), Int#, reallyUnsafePtrEquality#, tagToEnum#, unsafeCoerce#, State#)
-import GHC.ST (ST(..))
-import Control.Monad.ST (stToIO)
+import Control.DeepSeq     (NFData (..), NFData1 (..))
+import Control.Monad       ((>=>))
+import Control.Monad.ST    (runST, stToIO)
+import GHC.Exts            (Int (..), SmallArray#, SmallMutableArray#,
+                            cloneSmallMutableArray#, copySmallArray#,
+                            copySmallMutableArray#, indexSmallArray#,
+                            newSmallArray#, readSmallArray#,
+                            reallyUnsafePtrEquality#, sizeofSmallArray#,
+                            sizeofSmallMutableArray#, tagToEnum#,
+                            thawSmallArray#, unsafeCoerce#,
+                            unsafeFreezeSmallArray#, unsafeThawSmallArray#,
+                            writeSmallArray#)
+import GHC.ST              (ST (..))
+import Prelude             hiding (all, filter, foldMap, foldl, foldr, length,
+                            map, read, traverse)
 
-#if __GLASGOW_HASKELL__ >= 709
-import Prelude hiding (filter, foldr, length, map, read, traverse)
-#else
-import Prelude hiding (filter, foldr, length, map, read)
-#endif
-
-#if __GLASGOW_HASKELL__ >= 710
-import GHC.Exts (SmallArray#, newSmallArray#, readSmallArray#, writeSmallArray#,
-                 indexSmallArray#, unsafeFreezeSmallArray#, unsafeThawSmallArray#,
-                 SmallMutableArray#, sizeofSmallArray#, copySmallArray#, thawSmallArray#,
-                 sizeofSmallMutableArray#, copySmallMutableArray#, cloneSmallMutableArray#)
-
-#else
-import GHC.Exts (Array#, newArray#, readArray#, writeArray#,
-                 indexArray#, unsafeFreezeArray#, unsafeThawArray#,
-                 MutableArray#, sizeofArray#, copyArray#, thawArray#,
-                 sizeofMutableArray#, copyMutableArray#, cloneMutableArray#)
-#endif
-
+import qualified Language.Haskell.TH.Syntax as TH
 #if defined(ASSERTS)
 import qualified Prelude
 #endif
 
-import Data.HashMap.Unsafe (runST)
-import Control.Monad ((>=>))
-
-
-#if __GLASGOW_HASKELL__ >= 710
-type Array# a = SmallArray# a
-type MutableArray# a = SmallMutableArray# a
-
-newArray# :: Int# -> a -> State# d -> (# State# d, SmallMutableArray# d a #)
-newArray# = newSmallArray#
-
-unsafeFreezeArray# :: SmallMutableArray# d a
-                   -> State# d -> (# State# d, SmallArray# a #)
-unsafeFreezeArray# = unsafeFreezeSmallArray#
-
-readArray# :: SmallMutableArray# d a
-           -> Int# -> State# d -> (# State# d, a #)
-readArray# = readSmallArray#
-
-writeArray# :: SmallMutableArray# d a
-            -> Int# -> a -> State# d -> State# d
-writeArray# = writeSmallArray#
-
-indexArray# :: SmallArray# a -> Int# -> (# a #)
-indexArray# = indexSmallArray#
-
-unsafeThawArray# :: SmallArray# a
-                 -> State# d -> (# State# d, SmallMutableArray# d a #)
-unsafeThawArray# = unsafeThawSmallArray#
-
-sizeofArray# :: SmallArray# a -> Int#
-sizeofArray# = sizeofSmallArray#
-
-copyArray# :: SmallArray# a
-           -> Int#
-           -> SmallMutableArray# d a
-           -> Int#
-           -> Int#
-           -> State# d
-           -> State# d
-copyArray# = copySmallArray#
-
-cloneMutableArray# :: SmallMutableArray# s a
-                   -> Int#
-                   -> Int#
-                   -> State# s
-                   -> (# State# s, SmallMutableArray# s a #)
-cloneMutableArray# = cloneSmallMutableArray#
-
-thawArray# :: SmallArray# a
-           -> Int#
-           -> Int#
-           -> State# d
-           -> (# State# d, SmallMutableArray# d a #)
-thawArray# = thawSmallArray#
-
-sizeofMutableArray# :: SmallMutableArray# s a -> Int#
-sizeofMutableArray# = sizeofSmallMutableArray#
-
-copyMutableArray# :: SmallMutableArray# d a
-                  -> Int#
-                  -> SmallMutableArray# d a
-                  -> Int#
-                  -> Int#
-                  -> State# d
-                  -> State# d
-copyMutableArray# = copySmallMutableArray#
-#endif
-
-------------------------------------------------------------------------
 
 #if defined(ASSERTS)
 -- This fugly hack is brought by GHC's apparent reluctance to deal
 -- with MagicHash and UnboxedTuples when inferring types. Eek!
 # define CHECK_BOUNDS(_func_,_len_,_k_) \
-if (_k_) < 0 || (_k_) >= (_len_) then error ("Data.HashMap.Array." ++ (_func_) ++ ": bounds error, offset " ++ show (_k_) ++ ", length " ++ show (_len_)) else
+if (_k_) < 0 || (_k_) >= (_len_) then error ("Data.HashMap.Internal.Array." ++ (_func_) ++ ": bounds error, offset " ++ show (_k_) ++ ", length " ++ show (_len_)) else
 # define CHECK_OP(_func_,_op_,_lhs_,_rhs_) \
-if not ((_lhs_) _op_ (_rhs_)) then error ("Data.HashMap.Array." ++ (_func_) ++ ": Check failed: _lhs_ _op_ _rhs_ (" ++ show (_lhs_) ++ " vs. " ++ show (_rhs_) ++ ")") else
+if not ((_lhs_) _op_ (_rhs_)) then error ("Data.HashMap.Internal.Array." ++ (_func_) ++ ": Check failed: _lhs_ _op_ _rhs_ (" ++ show (_lhs_) ++ " vs. " ++ show (_rhs_) ++ ")") else
 # define CHECK_GT(_func_,_lhs_,_rhs_) CHECK_OP(_func_,>,_lhs_,_rhs_)
 # define CHECK_LE(_func_,_lhs_,_rhs_) CHECK_OP(_func_,<=,_lhs_,_rhs_)
 # define CHECK_EQ(_func_,_lhs_,_rhs_) CHECK_OP(_func_,==,_lhs_,_rhs_)
@@ -175,7 +120,7 @@ if not ((_lhs_) _op_ (_rhs_)) then error ("Data.HashMap.Array." ++ (_func_) ++ "
 #endif
 
 data Array a = Array {
-      unArray :: !(Array# a)
+      unArray :: !(SmallArray# a)
     }
 
 instance Show a => Show (Array a) where
@@ -203,26 +148,16 @@ sameArray1 eq !xs0 !ys0
     !lenys = length ys0
 
 length :: Array a -> Int
-length ary = I# (sizeofArray# (unArray ary))
+length ary = I# (sizeofSmallArray# (unArray ary))
 {-# INLINE length #-}
 
--- | Smart constructor
-array :: Array# a -> Int -> Array a
-array ary _n = Array ary
-{-# INLINE array #-}
-
 data MArray s a = MArray {
-      unMArray :: !(MutableArray# s a)
+      unMArray :: !(SmallMutableArray# s a)
     }
 
 lengthM :: MArray s a -> Int
-lengthM mary = I# (sizeofMutableArray# (unMArray mary))
+lengthM mary = I# (sizeofSmallMutableArray# (unMArray mary))
 {-# INLINE lengthM #-}
-
--- | Smart constructor
-marray :: MutableArray# s a -> Int -> MArray s a
-marray mary _n = MArray mary
-{-# INLINE marray #-}
 
 ------------------------------------------------------------------------
 
@@ -241,15 +176,29 @@ rnfArray ary0 = go ary0 n0 0
 -- relevant rnf is strict, or in case it actually isn't.
 {-# INLINE rnfArray #-}
 
+-- | @since 0.2.14.0
+instance NFData1 Array where
+    liftRnf = liftRnfArray
+
+liftRnfArray :: (a -> ()) -> Array a -> ()
+liftRnfArray rnf0 ary0 = go ary0 n0 0
+  where
+    n0 = length ary0
+    go !ary !n !i
+        | i >= n = ()
+        | (# x #) <- index# ary i
+        = rnf0 x `seq` go ary n (i+1)
+{-# INLINE liftRnfArray #-}
+
 -- | Create a new mutable array of specified size, in the specified
 -- state thread, with each element containing the specified initial
 -- value.
 new :: Int -> a -> ST s (MArray s a)
-new n@(I# n#) b =
-    CHECK_GT("new",n,(0 :: Int))
+new _n@(I# n#) b =
+    CHECK_GT("new",_n,(0 :: Int))
     ST $ \s ->
-        case newArray# n# b s of
-            (# s', ary #) -> (# s', marray ary n #)
+        case newSmallArray# n# b s of
+            (# s', ary #) -> (# s', MArray ary #)
 {-# INLINE new #-}
 
 new_ :: Int -> ST s (MArray s a)
@@ -273,55 +222,49 @@ pair x y = run $ do
 read :: MArray s a -> Int -> ST s a
 read ary _i@(I# i#) = ST $ \ s ->
     CHECK_BOUNDS("read", lengthM ary, _i)
-        readArray# (unMArray ary) i# s
+        readSmallArray# (unMArray ary) i# s
 {-# INLINE read #-}
 
 write :: MArray s a -> Int -> a -> ST s ()
 write ary _i@(I# i#) b = ST $ \ s ->
     CHECK_BOUNDS("write", lengthM ary, _i)
-        case writeArray# (unMArray ary) i# b s of
+        case writeSmallArray# (unMArray ary) i# b s of
             s' -> (# s' , () #)
 {-# INLINE write #-}
 
 index :: Array a -> Int -> a
 index ary _i@(I# i#) =
     CHECK_BOUNDS("index", length ary, _i)
-        case indexArray# (unArray ary) i# of (# b #) -> b
+        case indexSmallArray# (unArray ary) i# of (# b #) -> b
 {-# INLINE index #-}
 
 index# :: Array a -> Int -> (# a #)
 index# ary _i@(I# i#) =
     CHECK_BOUNDS("index#", length ary, _i)
-        indexArray# (unArray ary) i#
+        indexSmallArray# (unArray ary) i#
 {-# INLINE index# #-}
 
 indexM :: Array a -> Int -> ST s a
 indexM ary _i@(I# i#) =
     CHECK_BOUNDS("indexM", length ary, _i)
-        case indexArray# (unArray ary) i# of (# b #) -> return b
+        case indexSmallArray# (unArray ary) i# of (# b #) -> return b
 {-# INLINE indexM #-}
 
 unsafeFreeze :: MArray s a -> ST s (Array a)
 unsafeFreeze mary
-    = ST $ \s -> case unsafeFreezeArray# (unMArray mary) s of
-                   (# s', ary #) -> (# s', array ary (lengthM mary) #)
+    = ST $ \s -> case unsafeFreezeSmallArray# (unMArray mary) s of
+                   (# s', ary #) -> (# s', Array ary #)
 {-# INLINE unsafeFreeze #-}
 
 unsafeThaw :: Array a -> ST s (MArray s a)
 unsafeThaw ary
-    = ST $ \s -> case unsafeThawArray# (unArray ary) s of
-                   (# s', mary #) -> (# s', marray mary (length ary) #)
+    = ST $ \s -> case unsafeThawSmallArray# (unArray ary) s of
+                   (# s', mary #) -> (# s', MArray mary #)
 {-# INLINE unsafeThaw #-}
 
 run :: (forall s . ST s (MArray s e)) -> Array e
 run act = runST $ act >>= unsafeFreeze
 {-# INLINE run #-}
-
-run2 :: (forall s. ST s (MArray s e, a)) -> (Array e, a)
-run2 k = runST (do
-                 (marr,b) <- k
-                 arr <- unsafeFreeze marr
-                 return (arr,b))
 
 -- | Unsafely copy the elements of an array. Array bounds are not checked.
 copy :: Array e -> Int -> MArray s e -> Int -> Int -> ST s ()
@@ -329,7 +272,7 @@ copy !src !_sidx@(I# sidx#) !dst !_didx@(I# didx#) _n@(I# n#) =
     CHECK_LE("copy", _sidx + _n, length src)
     CHECK_LE("copy", _didx + _n, lengthM dst)
         ST $ \ s# ->
-        case copyArray# (unArray src) sidx# (unMArray dst) didx# n# s# of
+        case copySmallArray# (unArray src) sidx# (unMArray dst) didx# n# s# of
             s2 -> (# s2, () #)
 
 -- | Unsafely copy the elements of an array. Array bounds are not checked.
@@ -338,15 +281,15 @@ copyM !src !_sidx@(I# sidx#) !dst !_didx@(I# didx#) _n@(I# n#) =
     CHECK_BOUNDS("copyM: src", lengthM src, _sidx + _n - 1)
     CHECK_BOUNDS("copyM: dst", lengthM dst, _didx + _n - 1)
     ST $ \ s# ->
-    case copyMutableArray# (unMArray src) sidx# (unMArray dst) didx# n# s# of
+    case copySmallMutableArray# (unMArray src) sidx# (unMArray dst) didx# n# s# of
         s2 -> (# s2, () #)
 
 cloneM :: MArray s a -> Int -> Int -> ST s (MArray s a)
 cloneM _mary@(MArray mary#) _off@(I# off#) _len@(I# len#) =
-    CHECK_BOUNDS("cloneM_off", lengthM _mary, _off - 1)
+    CHECK_BOUNDS("cloneM_off", lengthM _mary, _off)
     CHECK_BOUNDS("cloneM_end", lengthM _mary, _off + _len - 1)
     ST $ \ s ->
-    case cloneMutableArray# mary# off# len# s of
+    case cloneSmallMutableArray# mary# off# len# s of
       (# s', mary'# #) -> (# s', MArray mary'# #)
 
 -- | Create a new array of the @n@ first elements of @mary@.
@@ -365,9 +308,8 @@ insert ary idx b = runST (insertM ary idx b)
 insertM :: Array e -> Int -> e -> ST s (Array e)
 insertM ary idx b =
     CHECK_BOUNDS("insertM", count + 1, idx)
-        do mary <- new_ (count+1)
+        do mary <- new (count+1) b
            copy ary 0 mary 0 idx
-           write mary idx b
            copy ary idx mary (idx+1) (count-idx)
            unsafeFreeze mary
   where !count = length ary
@@ -418,6 +360,15 @@ foldl' f = \ z0 ary0 -> go ary0 (length ary0) 0 z0
             (# x #) -> go ary n (i+1) (f z x)
 {-# INLINE foldl' #-}
 
+foldr' :: (a -> b -> b) -> b -> Array a -> b
+foldr' f = \ z0 ary0 -> go ary0 (length ary0 - 1) z0
+  where
+    go !_ary (-1) z = z
+    go !ary i !z
+      | (# x #) <- index# ary i
+      = go ary (i - 1) (f x z)
+{-# INLINE foldr' #-}
+
 foldr :: (a -> b -> b) -> b -> Array a -> b
 foldr f = \ z0 ary0 -> go ary0 (length ary0) 0 z0
   where
@@ -428,15 +379,43 @@ foldr f = \ z0 ary0 -> go ary0 (length ary0) 0 z0
             (# x #) -> f x (go ary n (i+1) z)
 {-# INLINE foldr #-}
 
+foldl :: (b -> a -> b) -> b -> Array a -> b
+foldl f = \ z0 ary0 -> go ary0 (length ary0 - 1) z0
+  where
+    go _ary (-1) z = z
+    go ary i z
+      | (# x #) <- index# ary i
+      = f (go ary (i - 1) z) x
+{-# INLINE foldl #-}
+
+-- We go to a bit of trouble here to avoid appending an extra mempty.
+-- The below implementation is by Mateusz Kowalczyk, who indicates that
+-- benchmarks show it to be faster than one that avoids lifting out
+-- lst.
+foldMap :: Monoid m => (a -> m) -> Array a -> m
+foldMap f = \ary0 -> case length ary0 of
+  0 -> mempty
+  len ->
+    let !lst = len - 1
+        go i | (# x #) <- index# ary0 i, let fx = f x =
+          if i == lst then fx else fx `mappend` go (i + 1)
+    in go 0
+{-# INLINE foldMap #-}
+
+-- | Verifies that a predicate holds for all elements of an array.
+all :: (a -> Bool) -> Array a -> Bool
+all p = foldr (\a acc -> p a && acc) True
+{-# INLINE all #-}
+
 undefinedElem :: a
-undefinedElem = error "Data.HashMap.Array: Undefined element"
+undefinedElem = error "Data.HashMap.Internal.Array: Undefined element"
 {-# NOINLINE undefinedElem #-}
 
 thaw :: Array e -> Int -> Int -> ST s (MArray s e)
-thaw !ary !_o@(I# o#) !n@(I# n#) =
-    CHECK_LE("thaw", _o + n, length ary)
-        ST $ \ s -> case thawArray# (unArray ary) o# n# s of
-            (# s2, mary# #) -> (# s2, marray mary# n #)
+thaw !ary !_o@(I# o#) _n@(I# n#) =
+    CHECK_LE("thaw", _o + _n, length ary)
+        ST $ \ s -> case thawSmallArray# (unArray ary) o# n# s of
+            (# s2, mary# #) -> (# s2, MArray mary# #)
 {-# INLINE thaw #-}
 
 -- | /O(n)/ Delete an element at the given position in this array,
@@ -499,10 +478,32 @@ fromList n xs0 =
     go (x:xs) mary i = do write mary i x
                           go xs mary (i+1)
 
+fromList' :: Int -> [a] -> Array a
+fromList' n xs0 =
+    CHECK_EQ("fromList'", n, Prelude.length xs0)
+        run $ do
+            mary <- new_ n
+            go xs0 mary 0
+  where
+    go [] !mary !_   = return mary
+    go (!x:xs) mary i = do write mary i x
+                           go xs mary (i+1)
+
+-- | @since 0.2.17.0
+instance TH.Lift a => TH.Lift (Array a) where
+#if MIN_VERSION_template_haskell(2,16,0)
+  liftTyped ar = [|| fromList' arlen arlist ||]
+#else
+  lift ar = [| fromList' arlen arlist |]
+#endif
+    where
+      arlen = length ar
+      arlist = toList ar
+
 toList :: Array a -> [a]
 toList = foldr (:) []
 
-newtype STA a = STA {_runSTA :: forall s. MutableArray# s a -> ST s (Array a)}
+newtype STA a = STA {_runSTA :: forall s. SmallMutableArray# s a -> ST s (Array a)}
 
 runSTA :: Int -> STA a -> Array a
 runSTA !n (STA m) = runST $ new_ n >>= \ (MArray ar) -> m ar

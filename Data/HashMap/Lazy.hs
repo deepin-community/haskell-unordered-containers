@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP         #-}
 {-# LANGUAGE Trustworthy #-}
 
 ------------------------------------------------------------------------
@@ -20,7 +20,7 @@
 -- strings.
 --
 -- Many operations have a average-case complexity of /O(log n)/.  The
--- implementation uses a large base (i.e. 16) so in practice these
+-- implementation uses a large base (i.e. 32) so in practice these
 -- operations are constant time.
 module Data.HashMap.Lazy
     (
@@ -38,6 +38,8 @@ module Data.HashMap.Lazy
     , size
     , member
     , lookup
+    , (!?)
+    , findWithDefault
     , lookupDefault
     , (!)
     , insert
@@ -47,6 +49,8 @@ module Data.HashMap.Lazy
     , update
     , alter
     , alterF
+    , isSubmapOf
+    , isSubmapOfBy
 
       -- * Combine
       -- ** Union
@@ -55,10 +59,14 @@ module Data.HashMap.Lazy
     , unionWithKey
     , unions
 
+    -- ** Compose
+    , compose
+
       -- * Transformations
     , map
     , mapWithKey
     , traverseWithKey
+    , mapKeys
 
       -- * Difference and intersection
     , difference
@@ -68,10 +76,15 @@ module Data.HashMap.Lazy
     , intersectionWithKey
 
       -- * Folds
-    , foldl'
-    , foldlWithKey'
+    , foldMapWithKey
     , foldr
+    , foldl
+    , foldr'
+    , foldl'
+    , foldrWithKey'
+    , foldlWithKey'
     , foldrWithKey
+    , foldlWithKey
 
       -- * Filter
     , filter
@@ -87,17 +100,19 @@ module Data.HashMap.Lazy
     , toList
     , fromList
     , fromListWith
+    , fromListWithKey
 
       -- ** HashSets
     , HS.keysSet
     ) where
 
-import Data.HashMap.Base as HM
-import qualified Data.HashSet.Base as HS
-import Prelude ()
+import Data.HashMap.Internal
+import Prelude               ()
+
+import qualified Data.HashSet.Internal as HS
 
 -- $strictness
 --
 -- This module satisfies the following strictness property:
 --
--- * Key arguments are evaluated to WHNF
+-- * Key arguments are evaluated to WHNF.
